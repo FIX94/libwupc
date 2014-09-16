@@ -39,7 +39,7 @@ static u32 __WUPC_Inited = 0;
 
 static const u8 __WUPC_LEDState[] = { 0x10, 0x20, 0x40, 0x80 };
 
-#define CHAN_NOT_SET 4
+#define CHAN_MAX 4
 
 #define TRANSFER_CALIBRATE 0
 #define TRANSFER_DONE 1
@@ -71,6 +71,9 @@ static s32 __WUPC_HandleData(void *arg,void *buffer,u16 len)
 		__WUPC_PadData[chan].yAxisL = bswap16(*(u16*)(((u8*)buffer)+5)) - stat->yAxisLmid;
 		__WUPC_PadData[chan].yAxisR = bswap16(*(u16*)(((u8*)buffer)+7)) - stat->yAxisRmid;
 		__WUPC_PadData[chan].button = ~(*(u16*)(((u8*)buffer)+9)) << 16;
+		u8 extradata = ~(*(((u8*)buffer)+11));
+		__WUPC_PadData[chan].battery = (extradata >> 4) & 0x7;
+		__WUPC_PadData[chan].extra = extradata & 0xF;
 	}
 	return ERR_OK;
 }
@@ -79,7 +82,7 @@ static s32 __WUPC_HandleConnect(void *arg,struct bte_pcb *pcb,u8 err)
 {
 	struct WUPCStat *stat = (struct WUPCStat*)arg;
 
-	if(__WUPC_ChannelsUsed >= 4)
+	if(__WUPC_ChannelsUsed >= CHAN_MAX)
 	{
 		bte_disconnect(pcb);
 		return err;
@@ -109,26 +112,24 @@ static s32 __WUPC_HandleDisconnect(void *arg,struct bte_pcb *pcb __attribute__((
 
 	u32 i;
 	for(i = stat->channel; i < 3; ++i)
-	{
 		__WUPC_Connected[i] = __WUPC_Connected[i+1];
-		__WUPC_Connected[i+1] = NULL;
-	}
 	__WUPC_Connected[3] = NULL;
 
 	for(i = 0; i < CONF_PAD_MAX_REGISTERED; ++i)
 	{
-		if(__WUPC_Status[i].channel > stat->channel && __WUPC_Status[i].channel != CHAN_NOT_SET)
+		if(__WUPC_Status[i].channel > stat->channel && __WUPC_Status[i].channel != CHAN_MAX)
 		{
 			__WUPC_Status[i].channel--;
 			__WUPC_SetLED(__WUPC_Status[i].sock, __WUPC_Status[i].channel);
 		}
 	}
+	stat->channel = CHAN_MAX;
 	return err;
 }
 
 int __WUPC_RegisterPad(struct WUPCStat *stat, struct bd_addr *_bdaddr)
 {
-	stat->channel = CHAN_NOT_SET;
+	stat->channel = CHAN_MAX;
 	stat->bdaddr = *_bdaddr;
 
 	if(stat->sock == NULL)
@@ -168,39 +169,52 @@ int __wrap_wiiuse_register(struct wiimote_listen_t *wml, struct bd_addr *bdaddr,
 
 void WUPC_Init()
 {
-	u32 i;
-	for(i = 0; i < CONF_PAD_MAX_REGISTERED; ++i)
-		__WUPC_Status[i].channel = CHAN_NOT_SET;
-
+	if(__WUPC_Inited == 1)
+		return;
 	if(CONF_GetPadDevices(&__WUPC_Devices) < 0)
 		return;
+
+	u32 i;
+	for(i = 0; i < CHAN_MAX; ++i)
+		__WUPC_Connected[i] = NULL;
+
+	for(i = 0; i < CONF_PAD_MAX_REGISTERED; ++i)
+		__WUPC_Status[i].channel = CHAN_MAX;
+
+	__WUPC_ChannelsUsed = 0;
 	__WUPC_Inited = 1;
+}
+
+void WUPC_Disconnect(u8 chan)
+{
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return;
+	bte_disconnect(__WUPC_Connected[chan]->sock);
 }
 
 void WUPC_Shutdown()
 {
+	if(__WUPC_Inited == 0)
+		return;
+
 	__WUPC_Inited = 0;
 
 	u32 i;
 	for(i = 0; i < CONF_PAD_MAX_REGISTERED; ++i)
 	{
-		if(__WUPC_Status[i].channel != CHAN_NOT_SET)
-		{
+		if(__WUPC_Status[i].channel != CHAN_MAX)
 			bte_disconnect(__WUPC_Status[i].sock);
-			__WUPC_Status[i].channel = CHAN_NOT_SET;
-		}
 	}
 }
 
 struct WUPCData *WUPC_Data(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return NULL;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return NULL;
 	return &__WUPC_PadData[chan];
 }
 
 void WUPC_Rumble(u8 chan, bool rumble)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return;
 
 	u8 buf[2];
 	buf[0] = 0x11;
@@ -212,7 +226,7 @@ u32 WUPC_UpdateButtonStats()
 {
 	u32 newstate, oldstate;
 	u32 i, ret = 0;
-	for(i = 0; i < CHAN_NOT_SET; ++i)
+	for(i = 0; i < CHAN_MAX; ++i)
 	{
 		if(__WUPC_Connected[i] == NULL)
 			return ret;
@@ -228,36 +242,36 @@ u32 WUPC_UpdateButtonStats()
 
 u32 WUPC_ButtonsUp(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadButtons[chan].up;
 }
 u32 WUPC_ButtonsDown(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadButtons[chan].down;
 }
 u32 WUPC_ButtonsHeld(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadButtons[chan].state;
 }
 s16 WUPC_lStickX(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadData[chan].xAxisL;
 }
 s16 WUPC_lStickY(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadData[chan].yAxisL;
 }
 s16 WUPC_rStickX(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadData[chan].xAxisR;
 }
 s16 WUPC_rStickY(u8 chan)
 {
-	if(chan >= CHAN_NOT_SET || __WUPC_Connected[chan] == NULL) return 0;
+	if(chan >= CHAN_MAX || __WUPC_Connected[chan] == NULL) return 0;
 	return __WUPC_PadData[chan].yAxisR;
 }
