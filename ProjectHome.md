@@ -1,0 +1,1 @@
+This is a small addition to wiiuse which will allow the usage of a wiiu pro controller.
